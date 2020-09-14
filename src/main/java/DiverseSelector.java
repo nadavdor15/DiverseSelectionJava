@@ -17,6 +17,7 @@ import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
 public class DiverseSelector {
 
     public static class TextArrayWritable extends ArrayWritable {
+
         public TextArrayWritable() {
             super(Text.class);
         }
@@ -28,6 +29,10 @@ public class DiverseSelector {
                 texts[i] = new Text(strings[i]);
             }
             super.set(texts);
+        }
+
+        public int getSize() {
+            return super.get().length;
         }
 
         @Override
@@ -46,32 +51,6 @@ public class DiverseSelector {
         }
     }
 
-    public static class TextArrayArrayWritable extends ArrayWritable {
-        public TextArrayArrayWritable() {
-            super(TextArrayWritable.class);
-        }
-
-        public TextArrayArrayWritable(TextArrayWritable[] arrays) {
-            super(TextArrayWritable.class);
-            super.set(arrays);
-        }
-
-        @Override
-        public String toString() {
-            Writable[] data = super.get();
-            if (data.length == 0) {
-                return "";
-            }
-
-            StringBuilder sb = new StringBuilder();
-            for (Writable w : data) {
-                sb.append(w.toString()).append("$");
-            }
-            sb.setLength(sb.length() - 1);
-            return sb.toString();
-        }
-    }
-
     public static class GroupsRetriever
             extends Mapper<Object, Text, Text, TextArrayWritable> {
 
@@ -85,7 +64,7 @@ public class DiverseSelector {
     }
 
     public static class ReduceToArray
-            extends Reducer<Text, TextArrayWritable, Text, TextArrayArrayWritable> {
+            extends Reducer<Text, TextArrayWritable, Text, User> {
 
         public void reduce(Text user, Iterable<TextArrayWritable> groups,
                            Context context
@@ -98,7 +77,7 @@ public class DiverseSelector {
 
             TextArrayWritable[] groupsAsArray = new TextArrayWritable[l.size()];
             l.toArray(groupsAsArray);
-            context.write(user, new TextArrayArrayWritable(groupsAsArray));
+            context.write(user, new User(groupsAsArray));
         }
     }
 
@@ -142,7 +121,7 @@ public class DiverseSelector {
 //        job.setCombinerClass(ReduceToList.class);
         job.setReducerClass(ReduceToArray.class);
         job.setOutputKeyClass(Text.class);
-        job.setOutputValueClass(TextArrayArrayWritable.class);
+        job.setOutputValueClass(User.class);
 
 
         FileInputFormat.addInputPath(job, new Path(args[0]));

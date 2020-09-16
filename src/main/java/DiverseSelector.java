@@ -6,6 +6,7 @@ import java.net.URI;
 import java.util.*;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.ArrayWritable;
@@ -154,7 +155,7 @@ public class DiverseSelector {
         private static final IntWritable maxInt = new IntWritable(Integer.MAX_VALUE);
 
         public void reduce(IntWritable key, Iterable<Text> groups,
-                            Context context
+                           Context context
         ) throws IOException, InterruptedException {
             if (key.equals(maxInt)) {
                 int maxScore = 0;
@@ -169,9 +170,9 @@ public class DiverseSelector {
                     }
                 }
                 try {
-                    this.writeMaxToHDFS(maxUser + " " + maxScore);
-                } catch (Exception exception) {
-                    System.out.println(exception.toString());
+                    this.writeUserToHDFS(maxUser + " " + maxScore, context);
+                } catch (IOException e) {
+                    e.printStackTrace();
                 }
             } else {
                 for (Text text : groups) {
@@ -188,15 +189,31 @@ public class DiverseSelector {
             }
         }
 
-        private void writeMaxToHDFS(String maxUser) throws Exception {
-            Configuration configuration = new Configuration();
-            FileSystem hdfs = FileSystem.get( new URI( "hdfs://localhost:9000" ), configuration );
-            Path file = new Path("hdfs://localhost:9000/stam/max.txt");
-            if ( hdfs.exists( file )) { hdfs.delete( file, true ); }
-            OutputStream os = hdfs.create( file, new Progressable() { public void progress() { } });
-            BufferedWriter br = new BufferedWriter(new OutputStreamWriter(os, "UTF-8" ) );
+        private void writeUserToHDFS(String maxUser, Context context) throws IOException {
+            FSDataOutputStream os = null;
+            BufferedWriter br = null;
+            FileSystem hdfs = FileSystem.get(context.getConfiguration());
+
+            Path maxFile = new Path("max.txt");
+            if (hdfs.exists(maxFile)) {
+                hdfs.delete(maxFile, true );
+            }
+            os = hdfs.create(maxFile);
+            br = new BufferedWriter(new OutputStreamWriter(os, "UTF-8" ) );
             br.write(maxUser);
             br.close();
+
+            Path resultsFile = new Path("results.txt");
+            if (hdfs.exists(resultsFile)) {
+                os = hdfs.append(resultsFile);
+            } else {
+                os = hdfs.create(resultsFile);
+            }
+            br = new BufferedWriter(new OutputStreamWriter(os, "UTF-8" ) );
+            br.write(maxUser);
+            br.newLine();
+            br.close();
+
             hdfs.close();
         }
     }

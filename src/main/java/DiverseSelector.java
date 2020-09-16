@@ -1,12 +1,13 @@
 import java.io.*;
 import java.net.URI;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 
+import org.apache.commons.lang.ArrayUtils;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.FSDataInputStream;
-import org.apache.hadoop.fs.FSDataOutputStream;
-import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.*;
+import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.io.ArrayWritable;
 import org.apache.hadoop.io.IntWritable;
 import org.apache.hadoop.io.Text;
@@ -17,6 +18,7 @@ import org.apache.hadoop.mapreduce.Reducer;
 import org.apache.hadoop.mapreduce.lib.input.FileInputFormat;
 import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
 import org.apache.hadoop.util.Progressable;
+import org.apache.kerby.config.Conf;
 
 public class DiverseSelector {
 
@@ -105,14 +107,14 @@ public class DiverseSelector {
         public void map(Object key, Text value, Context context
         ) throws IOException, InterruptedException {
             String[] userInformation = value.toString().split("\\s+", 4);
-            Text user = new Text(userInformation[1]);
+            String id = userInformation[1];
             int score = Integer.parseInt(userInformation[2]);
             String[] rawGroups = userInformation[3].split("[$]");
             TextArrayWritable[] groups = new TextArrayWritable[rawGroups.length];
             for (int i = 0; i < rawGroups.length; i++) {
                 groups[i] = new TextArrayWritable(rawGroups[i].split(",\\s+"));
             }
-            context.write(numOfReduceTasks, new Text(new User(user.toString(), score, groups).toString()));
+            context.write(numOfReduceTasks, new Text(new User(id, score, groups).toString()));
         }
     }
 
@@ -223,12 +225,65 @@ public class DiverseSelector {
         }
     }
 
+    public static class MaxUserRemover
+            extends Mapper<Object, Text, IntWritable, User> {
+
+        private final static IntWritable key = new IntWritable(1);
+        private String maxUser;
+
+        protected void setup(Context context) throws IOException {
+            String maxUserInformation = readUserFromHDFS(context);
+            this.maxUser = maxUserInformation.split("\\s+")[0];
+        }
+
+        public void map(Object key, Text value, Context context
+        ) throws IOException, InterruptedException {
+            String[] userInformation = value.toString().split("\\s+", 4);
+            String id = userInformation[1];
+            if (!this.maxUser.equals(id)) {
+                int score = Integer.parseInt(userInformation[2]);
+                String[] rawGroups = userInformation[3].split("[$]");
+                TextArrayWritable[] groups = new TextArrayWritable[rawGroups.length];
+                for (int i = 0; i < rawGroups.length; i++) {
+                    List<String> groupAsList =
+                           new ArrayList<String>(Arrays.asList(rawGroups[i].split(",\\s+")));
+                    groupAsList.remove(this.maxUser);
+                    String[] groupWithoutMax = new String[groupAsList.size()];
+                    groupAsList.toArray(groupWithoutMax);
+                    groups[i] = new TextArrayWritable(groupWithoutMax);
+                }
+                context.write(MaxUserRemover.key, new User(id, groups));
+            }
+        }
+
+        private String readUserFromHDFS(Context context) throws IOException {
+            FSDataInputStream os;
+            BufferedReader br;
+            Configuration configuration = context.getConfiguration();
+            configuration.setBoolean("fs.hdfs.impl.disable.cache", true);
+            FileSystem hdfs = FileSystem.get(configuration);
+
+            String maxUser;
+            Path maxFile = new Path("max.txt");
+            if (hdfs.exists(maxFile)) {
+                os = hdfs.open(maxFile);
+                br = new BufferedReader(new InputStreamReader(os, "UTF-8" ) );
+                maxUser = br.readLine();
+                br.close();
+                hdfs.close();
+                return maxUser;
+            } else {
+                return "";
+            }
+        }
+    }
+
     public static void main(String[] args) throws Exception {
         /* JOB 1 */
         Configuration conf = new Configuration();
         Job job = Job.getInstance(conf, "Retrieve Groups");
 
-        job.getConfiguration().set("fs.file.impl", "com.conga.services.hadoop.patch.HADOOP_7682.WinLocalFileSystem");
+//        job.getConfiguration().set("fs.file.impl", "com.conga.services.hadoop.patch.HADOOP_7682.WinLocalFileSystem");
 
         job.setJarByClass(DiverseSelector.class);
         job.setMapperClass(GroupsRetriever.class);
@@ -242,9 +297,7 @@ public class DiverseSelector {
         FileInputFormat.addInputPath(job, new Path(args[0]));
         FileOutputFormat.setOutputPath(job, new Path(args[1]));
 
-        boolean result = job.waitForCompletion(true);
-
-        if (!result) {
+        if (!job.waitForCompletion(true)) {
             System.exit(1);
         }
 
@@ -252,7 +305,7 @@ public class DiverseSelector {
         Configuration conf2 = new Configuration();
         Job job2 = Job.getInstance(conf2, "Retrieve Maximal User");
 
-        job2.getConfiguration().set("fs.file.impl", "com.conga.services.hadoop.patch.HADOOP_7682.WinLocalFileSystem");
+//        job2.getConfiguration().set("fs.file.impl", "com.conga.services.hadoop.patch.HADOOP_7682.WinLocalFileSystem");
 
         job2.setJarByClass(DiverseSelector.class);
         job2.setMapperClass(UserRetriever.class);
@@ -267,9 +320,27 @@ public class DiverseSelector {
         FileInputFormat.addInputPath(job2, new Path(args[1]));
         FileOutputFormat.setOutputPath(job2, new Path(args[2]));
 
-        result = job2.waitForCompletion(true);
+        if (!job2.waitForCompletion(true)) {
+            System.exit(1);
+        }
 
-        if (!result) {
+        /* JOB 3 */
+        Configuration conf3 = new Configuration();
+        Job job3 = Job.getInstance(conf3, "Remove Maximal User");
+
+//        job3.getConfiguration().set("fs.file.impl", "com.conga.services.hadoop.patch.HADOOP_7682.WinLocalFileSystem");
+
+        job3.setJarByClass(DiverseSelector.class);
+        job3.setMapperClass(MaxUserRemover.class);
+        job3.setMapOutputKeyClass(IntWritable.class);
+        job3.setMapOutputValueClass(User.class);
+
+        job3.setNumReduceTasks(0);
+
+        FileInputFormat.addInputPath(job3, new Path(args[2]));
+        FileOutputFormat.setOutputPath(job3, new Path(args[3]));
+
+        if (!job3.waitForCompletion(true)) {
             System.exit(1);
         }
 

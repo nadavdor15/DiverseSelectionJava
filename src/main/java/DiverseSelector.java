@@ -1,11 +1,9 @@
-import java.io.BufferedWriter;
-import java.io.IOException;
-import java.io.OutputStream;
-import java.io.OutputStreamWriter;
+import java.io.*;
 import java.net.URI;
 import java.util.*;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -76,7 +74,9 @@ public class DiverseSelector {
     }
 
     public static class ReduceToUser
-            extends Reducer<Text, TextArrayWritable, Text, User> {
+            extends Reducer<Text, TextArrayWritable, IntWritable, User> {
+
+        private final static IntWritable key = new IntWritable(1);
 
         public void reduce(Text user, Iterable<TextArrayWritable> groups,
                            Context context
@@ -89,26 +89,30 @@ public class DiverseSelector {
 
             TextArrayWritable[] groupsAsArray = new TextArrayWritable[groupsAsList.size()];
             groupsAsList.toArray(groupsAsArray);
-            context.write(user, new User(user.toString(), groupsAsArray));
+            context.write(key, new User(user.toString(), groupsAsArray));
         }
     }
 
     public static class UserRetriever
             extends Mapper<Object, Text, IntWritable, Text> {
 
-        private final static IntWritable one = new IntWritable(1);
+        private IntWritable numOfReduceTasks;
+
+        protected void setup(Context context) {
+            this.numOfReduceTasks = new IntWritable(context.getNumReduceTasks());
+        }
 
         public void map(Object key, Text value, Context context
         ) throws IOException, InterruptedException {
-            String[] userInformation = value.toString().split("\\s+", 3);
-            Text user = new Text(userInformation[0]);
-            int score = Integer.parseInt(userInformation[1]);
-            String[] rawGroups = userInformation[2].split("[$]");
+            String[] userInformation = value.toString().split("\\s+", 4);
+            Text user = new Text(userInformation[1]);
+            int score = Integer.parseInt(userInformation[2]);
+            String[] rawGroups = userInformation[3].split("[$]");
             TextArrayWritable[] groups = new TextArrayWritable[rawGroups.length];
             for (int i = 0; i < rawGroups.length; i++) {
                 groups[i] = new TextArrayWritable(rawGroups[i].split(",\\s+"));
             }
-            context.write(one, new Text(user.toString() + " " + new User(user.toString(), score, groups).toString()));
+            context.write(numOfReduceTasks, new Text(new User(user.toString(), score, groups).toString()));
         }
     }
 
@@ -150,8 +154,9 @@ public class DiverseSelector {
     }
 
     public static class MaxUserRetriever
-            extends Reducer<IntWritable, Text, Text, User> {
+            extends Reducer<IntWritable, Text, IntWritable, User> {
 
+        private static final IntWritable key = new IntWritable(1);
         private static final IntWritable maxInt = new IntWritable(Integer.MAX_VALUE);
 
         public void reduce(IntWritable key, Iterable<Text> groups,
@@ -184,14 +189,14 @@ public class DiverseSelector {
                     for (int i = 0; i < rawGroups.length; i++) {
                         groupsAsArray[i] = new TextArrayWritable(rawGroups[i].split(",\\s+"));
                     }
-                    context.write(new Text(currentUser), new User(currentUser, currentScore, groupsAsArray));
+                    context.write(MaxUserRetriever.key, new User(currentUser, currentScore, groupsAsArray));
                 }
             }
         }
 
         private void writeUserToHDFS(String maxUser, Context context) throws IOException {
-            FSDataOutputStream os = null;
-            BufferedWriter br = null;
+            FSDataOutputStream os;
+            BufferedWriter br;
             FileSystem hdfs = FileSystem.get(context.getConfiguration());
 
             Path maxFile = new Path("max.txt");
@@ -231,7 +236,7 @@ public class DiverseSelector {
         job.setMapOutputValueClass(TextArrayWritable.class);
 
         job.setReducerClass(ReduceToUser.class);
-        job.setOutputKeyClass(Text.class);
+        job.setOutputKeyClass(IntWritable.class);
         job.setOutputValueClass(User.class);
 
         FileInputFormat.addInputPath(job, new Path(args[0]));
@@ -256,7 +261,7 @@ public class DiverseSelector {
 
         job2.setCombinerClass(PartialMaxUserRetriever.class);
         job2.setReducerClass(MaxUserRetriever.class);
-        job2.setOutputKeyClass(Text.class);
+        job2.setOutputKeyClass(IntWritable.class);
         job2.setOutputValueClass(Text.class);
 
         FileInputFormat.addInputPath(job2, new Path(args[1]));

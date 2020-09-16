@@ -39,10 +39,6 @@ public class User extends ArrayWritable {
         }
     }
 
-    public String getId() {
-        return this.id;
-    }
-
     public int getScore() {
         return this.score;
     }
@@ -68,7 +64,7 @@ public class User extends ArrayWritable {
 
         this.calculateScore(data);
 
-        StringBuilder sb = new StringBuilder().append(this.score).append(" ");
+        StringBuilder sb = new StringBuilder().append(this.id).append(" ").append(this.score).append(" ");
         for (DiverseSelector.TextArrayWritable w : data) {
             sb.append(w.toString()).append("$");
         }

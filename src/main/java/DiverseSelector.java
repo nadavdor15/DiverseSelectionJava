@@ -1,11 +1,15 @@
+import java.io.BufferedWriter;
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Iterator;
-import java.util.List;
+import java.io.OutputStream;
+import java.io.OutputStreamWriter;
+import java.net.URI;
+import java.util.*;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.ArrayWritable;
+import org.apache.hadoop.io.IntWritable;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.io.Writable;
 import org.apache.hadoop.mapreduce.Job;
@@ -13,6 +17,7 @@ import org.apache.hadoop.mapreduce.Mapper;
 import org.apache.hadoop.mapreduce.Reducer;
 import org.apache.hadoop.mapreduce.lib.input.FileInputFormat;
 import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
+import org.apache.hadoop.util.Progressable;
 
 public class DiverseSelector {
 
@@ -49,6 +54,12 @@ public class DiverseSelector {
             sb.setLength(sb.length() - 2);
             return sb.toString();
         }
+
+        protected TextArrayWritable clone() {
+            TextArrayWritable textArrayWritable = new TextArrayWritable();
+            textArrayWritable.set(super.get().clone());
+            return textArrayWritable;
+        }
     }
 
     public static class GroupsRetriever
@@ -56,55 +67,139 @@ public class DiverseSelector {
 
         public void map(Object key, Text value, Context context
         ) throws IOException, InterruptedException {
-            String[] groups =  value.toString().split(",\\s+");
-            for (String group : groups) {
-                context.write(new Text(group), new TextArrayWritable(groups));
+            String[] group =  value.toString().split(",\\s+");
+            for (String user : group) {
+                context.write(new Text(user), new TextArrayWritable(group));
             }
         }
     }
 
-    public static class ReduceToArray
+    public static class ReduceToUser
             extends Reducer<Text, TextArrayWritable, Text, User> {
 
         public void reduce(Text user, Iterable<TextArrayWritable> groups,
                            Context context
         ) throws IOException, InterruptedException {
-            List<TextArrayWritable> l = new ArrayList<TextArrayWritable>();
+            List<TextArrayWritable> groupsAsList = new ArrayList<TextArrayWritable>();
 
-            for (TextArrayWritable t : groups) {
-                l.add(t);
+            for (TextArrayWritable textArrayWritable : groups) {
+                groupsAsList.add(textArrayWritable.clone());
             }
 
-            TextArrayWritable[] groupsAsArray = new TextArrayWritable[l.size()];
-            l.toArray(groupsAsArray);
-            context.write(user, new User(groupsAsArray));
+            TextArrayWritable[] groupsAsArray = new TextArrayWritable[groupsAsList.size()];
+            groupsAsList.toArray(groupsAsArray);
+            context.write(user, new User(user.toString(), groupsAsArray));
         }
     }
 
-//    public static class ScoresRetriever
-//            extends Mapper<Text, List, Text, List> {
-//
-//        public void map(Text user, List group, Context context
-//        ) throws IOException, InterruptedException {
-//            int score = 0;
-//        }
-//    }
+    public static class UserRetriever
+            extends Mapper<Object, Text, IntWritable, Text> {
 
-//    public static class IntSumReducer
-//            extends Reducer<Text, IntWritable, Text, IntWritable> {
-//        private IntWritable result = new IntWritable();
-//
-//        public void reduce(Text key, Iterable<IntWritable> values,
-//                           Context context
-//        ) throws IOException, InterruptedException {
-//            int sum = 0;
-//            for (IntWritable val : values) {
-//                sum += val.get();
-//            }
-//            result.set(sum);
-//            context.write(key, result);
-//        }
-//    }
+        private final static IntWritable one = new IntWritable(1);
+
+        public void map(Object key, Text value, Context context
+        ) throws IOException, InterruptedException {
+            String[] userInformation = value.toString().split("\\s+", 3);
+            Text user = new Text(userInformation[0]);
+            int score = Integer.parseInt(userInformation[1]);
+            String[] rawGroups = userInformation[2].split("[$]");
+            TextArrayWritable[] groups = new TextArrayWritable[rawGroups.length];
+            for (int i = 0; i < rawGroups.length; i++) {
+                groups[i] = new TextArrayWritable(rawGroups[i].split(",\\s+"));
+            }
+            context.write(one, new Text(user.toString() + " " + new User(user.toString(), score, groups).toString()));
+        }
+    }
+
+    public static class PartialMaxUserRetriever
+            extends Reducer<IntWritable, Text, IntWritable, Text> {
+
+        private static final IntWritable maxInt = new IntWritable(Integer.MAX_VALUE);
+
+        public void reduce(IntWritable key, Iterable<Text> groups,
+                           Context context
+        ) throws IOException, InterruptedException {
+            int maxScore = 0;
+            String maxUser = "";
+
+            for (Text text : groups) {
+                String[] userInformation = text.toString().split("\\s+", 3);
+                String currentUser = userInformation[0];
+                int currentScore = Integer.parseInt(userInformation[1]);
+                context.write(key, text);
+                if (currentScore > maxScore) {
+                    maxScore = currentScore;
+                    maxUser = currentUser;
+                }
+            }
+            context.write(maxInt, new Text(maxUser + " " + maxScore));
+        }
+
+        private void writeMaxToHDFS(String maxUser) throws Exception {
+            Configuration configuration = new Configuration();
+            FileSystem hdfs = FileSystem.get( new URI( "hdfs://localhost:9000" ), configuration );
+            Path file = new Path("hdfs://localhost:9000/stam/max.txt");
+            if ( hdfs.exists( file )) { hdfs.delete( file, true ); }
+            OutputStream os = hdfs.create( file, new Progressable() { public void progress() { } });
+            BufferedWriter br = new BufferedWriter(new OutputStreamWriter(os, "UTF-8" ) );
+            br.write(maxUser);
+            br.close();
+            hdfs.close();
+        }
+    }
+
+    public static class MaxUserRetriever
+            extends Reducer<IntWritable, Text, Text, User> {
+
+        private static final IntWritable maxInt = new IntWritable(Integer.MAX_VALUE);
+
+        public void reduce(IntWritable key, Iterable<Text> groups,
+                            Context context
+        ) throws IOException, InterruptedException {
+            if (key.equals(maxInt)) {
+                int maxScore = 0;
+                String maxUser = "";
+                for (Text text : groups) {
+                    String[] userInformation = text.toString().split("\\s+", 2);
+                    String currentUser = userInformation[0];
+                    int currentScore = Integer.parseInt(userInformation[1]);
+                    if (currentScore > maxScore) {
+                        maxScore = currentScore;
+                        maxUser = currentUser;
+                    }
+                }
+                try {
+                    this.writeMaxToHDFS(maxUser + " " + maxScore);
+                } catch (Exception exception) {
+                    System.out.println(exception.toString());
+                }
+            } else {
+                for (Text text : groups) {
+                    String[] userInformation = text.toString().split("\\s+", 3);
+                    String currentUser = userInformation[0];
+                    int currentScore = Integer.parseInt(userInformation[1]);
+                    String[] rawGroups = userInformation[2].split("[$]");
+                    TextArrayWritable[] groupsAsArray = new TextArrayWritable[rawGroups.length];
+                    for (int i = 0; i < rawGroups.length; i++) {
+                        groupsAsArray[i] = new TextArrayWritable(rawGroups[i].split(",\\s+"));
+                    }
+                    context.write(new Text(currentUser), new User(currentUser, currentScore, groupsAsArray));
+                }
+            }
+        }
+
+        private void writeMaxToHDFS(String maxUser) throws Exception {
+            Configuration configuration = new Configuration();
+            FileSystem hdfs = FileSystem.get( new URI( "hdfs://localhost:9000" ), configuration );
+            Path file = new Path("hdfs://localhost:9000/stam/max.txt");
+            if ( hdfs.exists( file )) { hdfs.delete( file, true ); }
+            OutputStream os = hdfs.create( file, new Progressable() { public void progress() { } });
+            BufferedWriter br = new BufferedWriter(new OutputStreamWriter(os, "UTF-8" ) );
+            br.write(maxUser);
+            br.close();
+            hdfs.close();
+        }
+    }
 
     public static void main(String[] args) throws Exception {
         /* JOB 1 */
@@ -118,11 +213,9 @@ public class DiverseSelector {
         job.setMapOutputKeyClass(Text.class);
         job.setMapOutputValueClass(TextArrayWritable.class);
 
-//        job.setCombinerClass(ReduceToList.class);
-        job.setReducerClass(ReduceToArray.class);
+        job.setReducerClass(ReduceToUser.class);
         job.setOutputKeyClass(Text.class);
         job.setOutputValueClass(User.class);
-
 
         FileInputFormat.addInputPath(job, new Path(args[0]));
         FileOutputFormat.setOutputPath(job, new Path(args[1]));
@@ -134,29 +227,30 @@ public class DiverseSelector {
         }
 
         /* JOB 2 */
-//        Configuration conf2 = new Configuration();
-//        Job job2 = Job.getInstance(conf, "Name 2");
-//
-//        job2.getConfiguration().set("fs.file.impl", "com.conga.services.hadoop.patch.HADOOP_7682.WinLocalFileSystem");
-//
-//        job2.setJarByClass(DiverseSelector.class);
-//        job2.setMapperClass(ScoresRetriever.class);
-//        job2.setReducerClass(ReduceToList.class);
-//
-//        job2.setOutputKeyClass(Text.class);
-//        job2.setOutputValueClass(List.class);
-//
-//        job2.getConfiguration().set("fs.file.impl", "com.conga.services.hadoop.patch.HADOOP_7682.WinLocalFileSystem");
-//
-//        FileInputFormat.addInputPath(job2, new Path(args[1]));
-//        FileOutputFormat.setOutputPath(job2, new Path(args[2]));
-//
-//        result = job2.waitForCompletion(true);
-//
-//        if (!result) {
-//            System.exit(1);
-//        }
+        Configuration conf2 = new Configuration();
+        Job job2 = Job.getInstance(conf2, "Retrieve Maximal User");
 
-        System.exit(result ? 0 : 1);
+        job2.getConfiguration().set("fs.file.impl", "com.conga.services.hadoop.patch.HADOOP_7682.WinLocalFileSystem");
+
+        job2.setJarByClass(DiverseSelector.class);
+        job2.setMapperClass(UserRetriever.class);
+        job2.setMapOutputKeyClass(IntWritable.class);
+        job2.setMapOutputValueClass(Text.class);
+
+        job2.setCombinerClass(PartialMaxUserRetriever.class);
+        job2.setReducerClass(MaxUserRetriever.class);
+        job2.setOutputKeyClass(Text.class);
+        job2.setOutputValueClass(Text.class);
+
+        FileInputFormat.addInputPath(job2, new Path(args[1]));
+        FileOutputFormat.setOutputPath(job2, new Path(args[2]));
+
+        result = job2.waitForCompletion(true);
+
+        if (!result) {
+            System.exit(1);
+        }
+
+        System.exit( 0);
     }
 }

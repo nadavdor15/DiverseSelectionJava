@@ -4,10 +4,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
-import org.apache.commons.lang.ArrayUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.*;
-import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.io.ArrayWritable;
 import org.apache.hadoop.io.IntWritable;
 import org.apache.hadoop.io.Text;
@@ -18,7 +16,6 @@ import org.apache.hadoop.mapreduce.Reducer;
 import org.apache.hadoop.mapreduce.lib.input.FileInputFormat;
 import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
 import org.apache.hadoop.util.Progressable;
-import org.apache.kerby.config.Conf;
 
 public class DiverseSelector {
 
@@ -68,7 +65,7 @@ public class DiverseSelector {
 
         public void map(Object key, Text value, Context context
         ) throws IOException, InterruptedException {
-            String[] group =  value.toString().split(",\\s+");
+            String[] group = value.toString().split(",\\s+");
             for (String user : group) {
                 context.write(new Text(user), new TextArrayWritable(group));
             }
@@ -141,18 +138,6 @@ public class DiverseSelector {
             }
             context.write(maxInt, new Text(maxUser + " " + maxScore));
         }
-
-        private void writeMaxToHDFS(String maxUser) throws Exception {
-            Configuration configuration = new Configuration();
-            FileSystem hdfs = FileSystem.get( new URI( "hdfs://localhost:9000" ), configuration );
-            Path file = new Path("hdfs://localhost:9000/stam/max.txt");
-            if ( hdfs.exists( file )) { hdfs.delete( file, true ); }
-            OutputStream os = hdfs.create( file, new Progressable() { public void progress() { } });
-            BufferedWriter br = new BufferedWriter(new OutputStreamWriter(os, "UTF-8" ) );
-            br.write(maxUser);
-            br.close();
-            hdfs.close();
-        }
     }
 
     public static class MaxUserRetriever
@@ -203,10 +188,10 @@ public class DiverseSelector {
 
             Path maxFile = new Path("max.txt");
             if (hdfs.exists(maxFile)) {
-                hdfs.delete(maxFile, true );
+                hdfs.delete(maxFile, true);
             }
             os = hdfs.create(maxFile);
-            br = new BufferedWriter(new OutputStreamWriter(os, "UTF-8" ) );
+            br = new BufferedWriter(new OutputStreamWriter(os, "UTF-8"));
             br.write(maxUser);
             br.close();
 
@@ -216,7 +201,7 @@ public class DiverseSelector {
             } else {
                 os = hdfs.create(resultsFile);
             }
-            br = new BufferedWriter(new OutputStreamWriter(os, "UTF-8" ) );
+            br = new BufferedWriter(new OutputStreamWriter(os, "UTF-8"));
             br.write(maxUser);
             br.newLine();
             br.close();
@@ -246,7 +231,7 @@ public class DiverseSelector {
                 TextArrayWritable[] groups = new TextArrayWritable[rawGroups.length];
                 for (int i = 0; i < rawGroups.length; i++) {
                     List<String> groupAsList =
-                           new ArrayList<String>(Arrays.asList(rawGroups[i].split(",\\s+")));
+                            new ArrayList<String>(Arrays.asList(rawGroups[i].split(",\\s+")));
                     groupAsList.remove(this.maxUser);
                     String[] groupWithoutMax = new String[groupAsList.size()];
                     groupAsList.toArray(groupWithoutMax);
@@ -267,7 +252,7 @@ public class DiverseSelector {
             Path maxFile = new Path("max.txt");
             if (hdfs.exists(maxFile)) {
                 os = hdfs.open(maxFile);
-                br = new BufferedReader(new InputStreamReader(os, "UTF-8" ) );
+                br = new BufferedReader(new InputStreamReader(os, "UTF-8"));
                 maxUser = br.readLine();
                 br.close();
                 hdfs.close();
@@ -278,72 +263,95 @@ public class DiverseSelector {
         }
     }
 
-    public static void main(String[] args) throws Exception {
-        /* JOB 1 */
+    public static boolean runJob(String jobName, Class<?> jarClass,
+                                 Class<? extends Mapper> mapper, Class<?> mapKey, Class<?> mapValue,
+                                 Class<? extends Reducer> combinerClass,
+                                 Class<? extends Reducer> reducerClass, Class<?> reduceKey, Class<?> reduceValue,
+                                 String inputPath, String outputPath) throws Exception {
         Configuration conf = new Configuration();
-        Job job = Job.getInstance(conf, "Retrieve Groups");
+//        conf.set("mapred.max.split.size", "67108864");
 
-//        job.getConfiguration().set("fs.file.impl", "com.conga.services.hadoop.patch.HADOOP_7682.WinLocalFileSystem");
+        Job job = Job.getInstance(conf, jobName);
 
-        job.setJarByClass(DiverseSelector.class);
-        job.setMapperClass(GroupsRetriever.class);
-        job.setMapOutputKeyClass(Text.class);
-        job.setMapOutputValueClass(TextArrayWritable.class);
+        job.getConfiguration().set("fs.file.impl", "com.conga.services.hadoop.patch.HADOOP_7682.WinLocalFileSystem");
 
-        job.setReducerClass(ReduceToUser.class);
-        job.setOutputKeyClass(IntWritable.class);
-        job.setOutputValueClass(User.class);
+        job.setJarByClass(jarClass);
 
-        FileInputFormat.addInputPath(job, new Path(args[0]));
-        FileOutputFormat.setOutputPath(job, new Path(args[1]));
+        job.setMapperClass(mapper);
+        job.setMapOutputKeyClass(mapKey);
+        job.setMapOutputValueClass(mapValue);
 
-        if (!job.waitForCompletion(true)) {
+        if (combinerClass != null) {
+            job.setCombinerClass(combinerClass);
+        }
+
+        if (reducerClass != null) {
+            job.setReducerClass(reducerClass);
+            job.setOutputKeyClass(reduceKey);
+            job.setOutputValueClass(reduceValue);
+            job.setNumReduceTasks(14);
+        } else {
+            job.setNumReduceTasks(0);
+        }
+
+        FileInputFormat.addInputPath(job, new Path(inputPath));
+        FileOutputFormat.setOutputPath(job, new Path(outputPath));
+
+        return job.waitForCompletion(true);
+    }
+
+    public static void main(String[] args) throws Exception {
+        String inputPath = args[0];
+        int selectionSize = Integer.parseInt(args[1]);
+
+        String[] jobsPaths = new String[selectionSize * 2 + 1];
+
+        jobsPaths[0] = "outputJob1";
+
+        for (int i = 1; i < jobsPaths.length; i++) {
+            if (i % 2 == 0) {
+                jobsPaths[i] = "outputFind" + i;
+            } else {
+                jobsPaths[i] = "outputRemove" + i;
+            }
+        }
+
+        /* JOB 1 */
+        boolean result = DiverseSelector.runJob("Retrieve Groups", DiverseSelector.class,
+                GroupsRetriever.class, Text.class, TextArrayWritable.class,
+                null,
+                ReduceToUser.class, IntWritable.class, User.class,
+                inputPath, jobsPaths[0]);
+
+        if (!result) {
             System.exit(1);
         }
 
-        /* JOB 2 */
-        Configuration conf2 = new Configuration();
-        Job job2 = Job.getInstance(conf2, "Retrieve Maximal User");
+        for (int i = 0; (i + 2) < jobsPaths.length; i += 2) {
+            /* JOB 2 */
+            result = DiverseSelector.runJob("Retrieve Maximal User", DiverseSelector.class,
+                    UserRetriever.class, IntWritable.class, Text.class,
+                    PartialMaxUserRetriever.class,
+                    MaxUserRetriever.class, IntWritable.class, Text.class,
+                    jobsPaths[i], jobsPaths[i + 1]);
 
-//        job2.getConfiguration().set("fs.file.impl", "com.conga.services.hadoop.patch.HADOOP_7682.WinLocalFileSystem");
+            if (!result) {
+                System.exit(1);
+            }
 
-        job2.setJarByClass(DiverseSelector.class);
-        job2.setMapperClass(UserRetriever.class);
-        job2.setMapOutputKeyClass(IntWritable.class);
-        job2.setMapOutputValueClass(Text.class);
 
-        job2.setCombinerClass(PartialMaxUserRetriever.class);
-        job2.setReducerClass(MaxUserRetriever.class);
-        job2.setOutputKeyClass(IntWritable.class);
-        job2.setOutputValueClass(Text.class);
+            /* JOB 3 */
+            result = DiverseSelector.runJob("Remove Maximal User", DiverseSelector.class,
+                    MaxUserRemover.class, IntWritable.class, User.class,
+                    null,
+                    null, null, null,
+                    jobsPaths[i + 1], jobsPaths[i + 2]);
 
-        FileInputFormat.addInputPath(job2, new Path(args[1]));
-        FileOutputFormat.setOutputPath(job2, new Path(args[2]));
-
-        if (!job2.waitForCompletion(true)) {
-            System.exit(1);
+            if (!result) {
+                System.exit(1);
+            }
         }
 
-        /* JOB 3 */
-        Configuration conf3 = new Configuration();
-        Job job3 = Job.getInstance(conf3, "Remove Maximal User");
-
-//        job3.getConfiguration().set("fs.file.impl", "com.conga.services.hadoop.patch.HADOOP_7682.WinLocalFileSystem");
-
-        job3.setJarByClass(DiverseSelector.class);
-        job3.setMapperClass(MaxUserRemover.class);
-        job3.setMapOutputKeyClass(IntWritable.class);
-        job3.setMapOutputValueClass(User.class);
-
-        job3.setNumReduceTasks(0);
-
-        FileInputFormat.addInputPath(job3, new Path(args[2]));
-        FileOutputFormat.setOutputPath(job3, new Path(args[3]));
-
-        if (!job3.waitForCompletion(true)) {
-            System.exit(1);
-        }
-
-        System.exit( 0);
+        System.exit(0);
     }
 }

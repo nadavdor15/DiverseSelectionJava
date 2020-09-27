@@ -226,10 +226,8 @@ public class EfficientDiverseSelector {
                     String groupId = group.toString().split("\\s+")[1];
                     if (this.maxUserGroups.contains(groupId)) {
                         groupSize -= 1;
-                        if (groupSize > 0) {
-                            newGroupsList.add((groupSize - 1) + " " + groupId);
-                        }
-                    } else {
+                    }
+                    if (groupSize > 0) {
                         newGroupsList.add(groupSize + " " + groupId);
                     }
                 }

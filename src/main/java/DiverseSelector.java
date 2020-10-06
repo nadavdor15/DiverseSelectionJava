@@ -267,11 +267,11 @@ public class DiverseSelector {
                                  Class<? extends Reducer> reducerClass, Class<?> reduceKey, Class<?> reduceValue,
                                  String inputPath, String outputPath) throws Exception {
         Configuration conf = new Configuration();
-//        conf.set("mapred.max.split.size", "67108864");
+        conf.set("mapred.max.split.size", "33554432");
 
         Job job = Job.getInstance(conf, jobName);
 
-        job.getConfiguration().set("fs.file.impl", "com.conga.services.hadoop.patch.HADOOP_7682.WinLocalFileSystem");
+//        job.getConfiguration().set("fs.file.impl", "com.conga.services.hadoop.patch.HADOOP_7682.WinLocalFileSystem");
 
         job.setJarByClass(jarClass);
 

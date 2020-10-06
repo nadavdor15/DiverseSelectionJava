@@ -39,7 +39,7 @@ public class EfficientUser extends EfficientDiverseSelector.TextArrayWritable {
             int sum = 0;
 
             for (Text group : groups) {
-                sum += Integer.parseInt(group.toString().split(",\\s+")[0]);
+                sum += Integer.parseInt(group.toString().split(",")[1]);
             }
 
             this.score = sum;
@@ -75,6 +75,10 @@ public class EfficientUser extends EfficientDiverseSelector.TextArrayWritable {
         this.calculateScore(data);
 
         return this.id + " " + this.score + " " + super.toString();
+    }
+
+    public Text toText() {
+        return new Text(this.toString());
     }
 
     public EfficientUser clone() {

@@ -1,6 +1,7 @@
 import java.io.*;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Random;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.*;
@@ -40,9 +41,9 @@ public class EfficientDiverseSelector {
 
             StringBuilder sb = new StringBuilder();
             for (Writable w : data) {
-                sb.append(w.toString()).append(", ");
+                sb.append(w.toString()).append(" ");
             }
-            sb.setLength(sb.length() - 2);
+            sb.setLength(sb.length() - 1);
             return sb.toString();
         }
 
@@ -53,7 +54,7 @@ public class EfficientDiverseSelector {
         }
     }
 
-    public static EfficientUser GetUser(Text userText) {
+    public static EfficientUser getUser(Text userText) {
         String[] userInformation = userText.toString().split("\\s+", 3);
         String currentUser = userInformation[0];
         int currentScore = Integer.parseInt(userInformation[1]);
@@ -67,7 +68,7 @@ public class EfficientDiverseSelector {
         public void map(Object key, Text value, Context context
         ) throws IOException, InterruptedException {
             String[] rawGroup = value.toString().split(",\\s+");
-            String group = rawGroup[0] + ", " + (rawGroup.length - 1);
+            String group = rawGroup[0] + "," + (rawGroup.length - 1);
             for (int i = 1; i < rawGroup.length; i++) {
                 context.write(new Text(rawGroup[i]), new Text(group));
             }
@@ -89,26 +90,25 @@ public class EfficientDiverseSelector {
             }
 
             String[] groupsAsArray = new String[groupsAsList.size()];
-            context.write(key, new EfficientUser(user.toString(), groupsAsArray));
+            context.write(key, new EfficientUser(user.toString(), groupsAsList.toArray(groupsAsArray)));
         }
     }
 
     public static class UserRetriever
             extends Mapper<Object, Text, IntWritable, Text> {
 
-        private IntWritable numOfReduceTasks;
+        private IntWritable randomKey;
 
         protected void setup(Context context) {
-            this.numOfReduceTasks = new IntWritable(context.getNumReduceTasks());
+            Random rand = new Random();
+            this.randomKey = new IntWritable(rand.nextInt(context.getNumReduceTasks()));
         }
 
         public void map(Object key, Text value, Context context
         ) throws IOException, InterruptedException {
-            String[] userInformation = value.toString().split("\\s+", 4);
-            String id = userInformation[1];
-            int score = Integer.parseInt(userInformation[2]);
-            String[] groups = userInformation[3].split("\\s+");
-            context.write(numOfReduceTasks, new Text(new EfficientUser(id, score, groups).toString()));
+            String valueAsString = value.toString();
+            String userInformation = valueAsString.substring(valueAsString.indexOf('\t') + 1);
+            context.write(randomKey, new Text(userInformation));
         }
     }
 
@@ -124,17 +124,14 @@ public class EfficientDiverseSelector {
             EfficientUser maxUser = new EfficientUser();
 
             for (Text text : users) {
-                String[] userInformation = text.toString().split("\\s+", 3);
-                String currentUser = userInformation[0];
-                int currentScore = Integer.parseInt(userInformation[1]);
                 context.write(key, text);
-                if (currentScore > maxScore) {
-                    maxScore = currentScore;
-                    String[] groups = userInformation[2].split("\\s+");
-                    maxUser = new EfficientUser(currentUser, currentScore, groups);
+                EfficientUser currentUser = EfficientDiverseSelector.getUser(text);
+                if (currentUser.getScore() > maxScore) {
+                    maxScore = currentUser.getScore();
+                    maxUser = currentUser;
                 }
             }
-            context.write(maxInt, new Text(maxUser.toString()));
+            context.write(maxInt, maxUser.toText());
         }
     }
 
@@ -151,7 +148,7 @@ public class EfficientDiverseSelector {
                 int maxScore = 0;
                 EfficientUser maxUser = new EfficientUser();
                 for (Text text : users) {
-                    EfficientUser user = EfficientDiverseSelector.GetUser(text);
+                    EfficientUser user = EfficientDiverseSelector.getUser(text);
                     int score = user.getScore();
                     if (score > maxScore) {
                         maxScore = score;
@@ -159,18 +156,18 @@ public class EfficientDiverseSelector {
                     }
                 }
                 try {
-                    this.writeUserToHDFS(maxUser.toString(), context);
+                    this.writeUserToHDFS(maxUser, context);
                 } catch (IOException e) {
                     e.printStackTrace();
                 }
             } else {
                 for (Text text : users) {
-                    context.write(MaxUserRetriever.key, EfficientDiverseSelector.GetUser(text));
+                    context.write(MaxUserRetriever.key, EfficientDiverseSelector.getUser(text));
                 }
             }
         }
 
-        private void writeUserToHDFS(String maxUser, Context context) throws IOException {
+        private void writeUserToHDFS(EfficientUser maxUser, Context context) throws IOException {
             FSDataOutputStream os;
             BufferedWriter br;
             FileSystem hdfs = FileSystem.get(context.getConfiguration());
@@ -181,7 +178,7 @@ public class EfficientDiverseSelector {
             }
             os = hdfs.create(maxFile);
             br = new BufferedWriter(new OutputStreamWriter(os, "UTF-8"));
-            br.write(maxUser);
+            br.write(maxUser.toString());
             br.close();
 
             Path resultsFile = new Path("results.txt");
@@ -191,7 +188,7 @@ public class EfficientDiverseSelector {
                 os = hdfs.create(resultsFile);
             }
             br = new BufferedWriter(new OutputStreamWriter(os, "UTF-8"));
-            br.write(maxUser);
+            br.write(maxUser.getId() + " " + maxUser.getScore());
             br.newLine();
             br.close();
 
@@ -210,7 +207,7 @@ public class EfficientDiverseSelector {
             this.maxUser = readUserFromHDFS(context);
             this.maxUserGroups = new ArrayList<String>();
             for (Text group : this.maxUser.get()) {
-                this.maxUserGroups.add(group.toString().split("\\s+")[1]);
+                this.maxUserGroups.add(group.toString().split("\\s+")[0]);
             }
         }
 
@@ -218,21 +215,23 @@ public class EfficientDiverseSelector {
         ) throws IOException, InterruptedException {
             String valueAsString = value.toString();
             value = new Text(valueAsString.substring(valueAsString.indexOf('\t') + 1));
-            EfficientUser user = EfficientDiverseSelector.GetUser(value);
+            EfficientUser user = EfficientDiverseSelector.getUser(value);
             List<String> newGroupsList = new ArrayList<String>();
             if (!this.maxUser.getId().equals(user.getId())) {
                 for (Text group : user.get()) {
-                    int groupSize = Integer.parseInt(group.toString().split("\\s+")[0]);
-                    String groupId = group.toString().split("\\s+")[1];
-                    if (this.maxUserGroups.contains(groupId)) {
+                    String[] groupInformation = group.toString().split(",");
+                    String groupIdx = groupInformation[0];
+                    int groupSize = Integer.parseInt(groupInformation[1]);
+                    if (this.maxUserGroups.contains(groupIdx)) {
                         groupSize -= 1;
                     }
                     if (groupSize > 0) {
-                        newGroupsList.add(groupSize + " " + groupId);
+                        newGroupsList.add(groupIdx + "," + groupSize);
                     }
                 }
                 String[] newGroupsArray = new String[newGroupsList.size()];
-                context.write(MaxUserRemover.key, new EfficientUser(user.getId(), newGroupsArray));
+                context.write(MaxUserRemover.key,
+                        new EfficientUser(user.getId(), newGroupsList.toArray(newGroupsArray)));
             }
         }
 
@@ -251,20 +250,20 @@ public class EfficientDiverseSelector {
                 maxUser = br.readLine();
                 br.close();
                 hdfs.close();
-                return EfficientDiverseSelector.GetUser(new Text(maxUser));
+                return EfficientDiverseSelector.getUser(new Text(maxUser));
             } else {
                 return null;
             }
         }
     }
 
-    public static boolean runJob(String jobName, Class<?> jarClass,
+    public static void runJob(String jobName, Class<?> jarClass, int blockSize,
                                  Class<? extends Mapper> mapper, Class<?> mapKey, Class<?> mapValue,
                                  Class<? extends Reducer> combinerClass,
                                  Class<? extends Reducer> reducerClass, Class<?> reduceKey, Class<?> reduceValue,
-                                 String inputPath, String outputPath) throws Exception {
+                                 int numReduceTasks, String inputPath, String outputPath) throws Exception {
         Configuration conf = new Configuration();
-//        conf.set("mapred.max.split.size", "67108864");
+        conf.set("mapred.max.split.size", Integer.toString(blockSize));
 
         Job job = Job.getInstance(conf, jobName);
 
@@ -284,7 +283,7 @@ public class EfficientDiverseSelector {
             job.setReducerClass(reducerClass);
             job.setOutputKeyClass(reduceKey);
             job.setOutputValueClass(reduceValue);
-            job.setNumReduceTasks(14);
+            job.setNumReduceTasks(numReduceTasks);
         } else {
             job.setNumReduceTasks(0);
         }
@@ -292,7 +291,9 @@ public class EfficientDiverseSelector {
         FileInputFormat.addInputPath(job, new Path(inputPath));
         FileOutputFormat.setOutputPath(job, new Path(outputPath));
 
-        return job.waitForCompletion(true);
+        if (!job.waitForCompletion(true)) {
+            System.exit(1);
+        }
     }
 
     public static void main(String[] args) throws Exception {
@@ -301,52 +302,40 @@ public class EfficientDiverseSelector {
 
         String[] jobsPaths = new String[selectionSize * 2 + 1];
 
-        jobsPaths[0] = "outputJob1";
+        jobsPaths[0] = "outputFirstJob";
 
         for (int i = 1; i < jobsPaths.length; i++) {
-            if (i % 2 == 0) {
-                jobsPaths[i] = "outputFind" + i;
+            if (i % 2 == 1) {
+                jobsPaths[i] = "outputFind" + (i/2 + 1);
             } else {
-                jobsPaths[i] = "outputRemove" + i;
+                jobsPaths[i] = "outputRemove" + (i/2);
             }
         }
 
         /* JOB 1 */
-        boolean result = EfficientDiverseSelector.runJob("Retrieve Groups", DiverseSelector.class,
+        EfficientDiverseSelector.runJob("Retrieve Groups",
+                EfficientDiverseSelector.class, 33554432,
                 GroupsRetriever.class, Text.class, Text.class,
                 null,
                 ReduceToUser.class, IntWritable.class, EfficientUser.class,
-                inputPath, jobsPaths[0]);
-
-        if (!result) {
-            System.exit(1);
-        }
+                14, inputPath, jobsPaths[0]);
 
         for (int i = 0; (i + 2) < jobsPaths.length; i += 2) {
             /* JOB 2 */
-            result = EfficientDiverseSelector.runJob("Retrieve Maximal User", DiverseSelector.class,
+            EfficientDiverseSelector.runJob("Find Maximal User",
+                    EfficientDiverseSelector.class, 14488790,
                     UserRetriever.class, IntWritable.class, Text.class,
                     PartialMaxUserRetriever.class,
                     MaxUserRetriever.class, IntWritable.class, EfficientUser.class,
-                    jobsPaths[i], jobsPaths[i + 1]);
-
-            if (!result) {
-                System.exit(1);
-            }
-
+                    1, jobsPaths[i], jobsPaths[i + 1]);
 
             /* JOB 3 */
-            result = EfficientDiverseSelector.runJob("Remove Maximal User", DiverseSelector.class,
+            EfficientDiverseSelector.runJob("Remove Maximal User",
+                    EfficientDiverseSelector.class, 14488790,
                     MaxUserRemover.class, IntWritable.class, EfficientUser.class,
                     null,
                     null, null, null,
-                    jobsPaths[i + 1], jobsPaths[i + 2]);
-
-            if (!result) {
-                System.exit(1);
-            }
+                    14, jobsPaths[i + 1], jobsPaths[i + 2]);
         }
-
-        System.exit(0);
     }
 }

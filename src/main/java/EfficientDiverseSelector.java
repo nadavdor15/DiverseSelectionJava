@@ -1,10 +1,21 @@
-import java.io.*;
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
 
+import com.beust.jcommander.JCommander;
+import com.beust.jcommander.Parameter;
+
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.*;
+import org.apache.hadoop.fs.FSDataInputStream;
+import org.apache.hadoop.fs.FSDataOutputStream;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.ArrayWritable;
 import org.apache.hadoop.io.IntWritable;
 import org.apache.hadoop.io.Text;
@@ -16,6 +27,15 @@ import org.apache.hadoop.mapreduce.lib.input.FileInputFormat;
 import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
 
 public class EfficientDiverseSelector {
+    @Parameter(names={"-s", "--size"}, description = "Number of users to select")
+    int selectionSize = 0;
+    @Parameter(names={"-i", "--input"}, description = "Path of the groups.txt file")
+    String inputPath = "input";
+    @Parameter(names={"-m", "--mappers"}, description = "Number of mappers")
+    int numberMappers = 8;
+    @Parameter(names={"-r", "--reducers"}, description = "Proportion of reducers to mappers")
+    double reducersProportion = 1.75;
+    private int numberReducers;
 
     public static class TextArrayWritable extends ArrayWritable {
 
@@ -52,6 +72,12 @@ public class EfficientDiverseSelector {
             textArrayWritable.set(super.get().clone());
             return textArrayWritable;
         }
+    }
+
+    private void setNumberReducers() {
+        this.numberReducers = (int) (this.reducersProportion > 0 ?
+                this.numberMappers * this.reducersProportion :
+                this.numberMappers * 1.75);
     }
 
     public static EfficientUser getUser(Text userText) {
@@ -297,13 +323,18 @@ public class EfficientDiverseSelector {
     }
 
     public static void main(String[] args) throws Exception {
-        String inputPath = args[0];
-        int selectionSize = Integer.parseInt(args[1]);
+        EfficientDiverseSelector diverseSelector = new EfficientDiverseSelector();
+        JCommander.newBuilder().addObject(diverseSelector).build().parse(args);
+        diverseSelector.setNumberReducers();
+        diverseSelector.select();
+    }
 
-        String[] jobsPaths = new String[selectionSize * 2 + 1];
+    public void select() throws Exception {
+//        System.out.printf("Input: %s\nSelection size: %d\nMappers: %d\nReducers: %d\n",
+//                this.inputPath, this.selectionSize, this.numberMappers, this.numberReducers);
+        String[] jobsPaths = new String[this.selectionSize * 2 + 1];
 
         jobsPaths[0] = "outputFirstJob";
-
         for (int i = 1; i < jobsPaths.length; i++) {
             if (i % 2 == 1) {
                 jobsPaths[i] = "outputFind" + (i/2 + 1);
@@ -313,17 +344,19 @@ public class EfficientDiverseSelector {
         }
 
         /* JOB 1 */
+        Path inputPath = new Path(Path.CUR_DIR + "/" + this.inputPath + "/" + "groups.txt");
+        long inputSize = inputPath.getFileSystem(new Configuration()).getContentSummary(inputPath).getLength();
         EfficientDiverseSelector.runJob("Retrieve Groups",
-                EfficientDiverseSelector.class, 33554432,
+                EfficientDiverseSelector.class, (int) ((inputSize / this.numberMappers) + 1),
                 GroupsRetriever.class, Text.class, Text.class,
                 null,
                 ReduceToUser.class, IntWritable.class, EfficientUser.class,
-                14, inputPath, jobsPaths[0]);
+                (int) (this.numberMappers * 1.75), this.inputPath, jobsPaths[0]);
 
         for (int i = 0; (i + 2) < jobsPaths.length; i += 2) {
             /* JOB 2 */
             EfficientDiverseSelector.runJob("Find Maximal User",
-                    EfficientDiverseSelector.class, 14488790,
+                    EfficientDiverseSelector.class, ((115910313 / this.numberMappers) + 1),
                     UserRetriever.class, IntWritable.class, Text.class,
                     PartialMaxUserRetriever.class,
                     MaxUserRetriever.class, IntWritable.class, EfficientUser.class,
@@ -331,11 +364,11 @@ public class EfficientDiverseSelector {
 
             /* JOB 3 */
             EfficientDiverseSelector.runJob("Remove Maximal User",
-                    EfficientDiverseSelector.class, 14488790,
+                    EfficientDiverseSelector.class, ((115910313 / this.numberMappers) + 1),
                     MaxUserRemover.class, IntWritable.class, EfficientUser.class,
                     null,
                     null, null, null,
-                    14, jobsPaths[i + 1], jobsPaths[i + 2]);
+                    (int) (this.numberMappers * 1.75), jobsPaths[i + 1], jobsPaths[i + 2]);
         }
     }
 }

@@ -11,14 +11,14 @@ public class EfficientUser extends EfficientDiverseSelector.TextArrayWritable {
         this.score = 0;
     }
 
-    public EfficientUser(String id, String[] strings) {
-        super(strings);
+    public EfficientUser(String id, String[] groups) {
+        super(groups);
         this.id = id;
         this.score = 0;
     }
 
-    public EfficientUser(String id, int score, String[] strings) {
-        super(strings);
+    public EfficientUser(String id, int score, String[] groups) {
+        super(groups);
         this.id = id;
         if (score < 0) {
             score = 0;

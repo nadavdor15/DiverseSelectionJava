@@ -1,6 +1,5 @@
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
-import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
@@ -28,8 +27,8 @@ import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
 
 public class EfficientDiverseSelector {
     @Parameter(names={"-s", "--size"}, description = "Number of users to select")
-    int selectionSize = 0;
-    @Parameter(names={"-i", "--input"}, description = "Path of the groups.txt file")
+    int selectionSize = 1;
+    @Parameter(names={"-i", "--input"}, description = "Path of the input file")
     String inputPath = "input";
     @Parameter(names={"-m", "--mappers"}, description = "Number of mappers")
     int numberMappers = 8;
@@ -75,7 +74,7 @@ public class EfficientDiverseSelector {
     }
 
     private void setNumberReducers() {
-        this.numberReducers = (int) (this.reducersProportion > 0 ?
+        this.numberReducers = (int) Math.round(this.reducersProportion > 0 ?
                 this.numberMappers * this.reducersProportion :
                 this.numberMappers * 1.75);
     }
@@ -91,12 +90,18 @@ public class EfficientDiverseSelector {
     public static class GroupsRetriever
             extends Mapper<Object, Text, Text, Text> {
 
+        private int getGroupCov() {
+            return 1;
+        }
+
         public void map(Object key, Text value, Context context
         ) throws IOException, InterruptedException {
             String[] rawGroup = value.toString().split(",\\s+");
-            String group = rawGroup[0] + "," + (rawGroup.length - 1);
+            String groupIdx = rawGroup[0];
+            int groupSize = rawGroup.length -1, groupCov = getGroupCov();
+            String groupInfo = groupIdx + "," + groupSize + "," + groupCov;
             for (int i = 1; i < rawGroup.length; i++) {
-                context.write(new Text(rawGroup[i]), new Text(group));
+                context.write(new Text(rawGroup[i]), new Text(groupInfo));
             }
         }
     }
@@ -138,7 +143,7 @@ public class EfficientDiverseSelector {
         }
     }
 
-    public static class PartialMaxUserRetriever
+    public static class LocalMaxRetriever
             extends Reducer<IntWritable, Text, IntWritable, Text> {
 
         private static final IntWritable maxInt = new IntWritable(Integer.MAX_VALUE);
@@ -161,7 +166,7 @@ public class EfficientDiverseSelector {
         }
     }
 
-    public static class MaxUserRetriever
+    public static class GlobalMaxRetriever
             extends Reducer<IntWritable, Text, IntWritable, EfficientUser> {
 
         private static final IntWritable key = new IntWritable(1);
@@ -188,7 +193,7 @@ public class EfficientDiverseSelector {
                 }
             } else {
                 for (Text text : users) {
-                    context.write(MaxUserRetriever.key, EfficientDiverseSelector.getUser(text));
+                    context.write(GlobalMaxRetriever.key, EfficientDiverseSelector.getUser(text));
                 }
             }
         }
@@ -222,7 +227,7 @@ public class EfficientDiverseSelector {
         }
     }
 
-    public static class MaxUserRemover
+    public static class ScoreUpdater
             extends Mapper<Object, Text, IntWritable, EfficientUser> {
 
         private final static IntWritable key = new IntWritable(1);
@@ -248,15 +253,17 @@ public class EfficientDiverseSelector {
                     String[] groupInformation = group.toString().split(",");
                     String groupIdx = groupInformation[0];
                     int groupSize = Integer.parseInt(groupInformation[1]);
+                    int groupCov = Integer.parseInt(groupInformation[2]);
                     if (this.maxUserGroups.contains(groupIdx)) {
-                        groupSize -= 1;
+                        groupCov -= 1;
                     }
-                    if (groupSize > 0) {
-                        newGroupsList.add(groupIdx + "," + groupSize);
+                    if (groupCov > 0) {
+                        String groupInfo = groupIdx + "," + groupSize + "," + groupCov;
+                        newGroupsList.add(groupInfo);
                     }
                 }
                 String[] newGroupsArray = new String[newGroupsList.size()];
-                context.write(MaxUserRemover.key,
+                context.write(ScoreUpdater.key,
                         new EfficientUser(user.getId(), newGroupsList.toArray(newGroupsArray)));
             }
         }
@@ -322,16 +329,8 @@ public class EfficientDiverseSelector {
         }
     }
 
-    public static void main(String[] args) throws Exception {
-        EfficientDiverseSelector diverseSelector = new EfficientDiverseSelector();
-        JCommander.newBuilder().addObject(diverseSelector).build().parse(args);
-        diverseSelector.setNumberReducers();
-        diverseSelector.select();
-    }
-
     public void select() throws Exception {
-//        System.out.printf("Input: %s\nSelection size: %d\nMappers: %d\nReducers: %d\n",
-//                this.inputPath, this.selectionSize, this.numberMappers, this.numberReducers);
+        System.out.printf("Mappers: %d\nReducers: %d\n", this.numberMappers, this.numberReducers);
         String[] jobsPaths = new String[this.selectionSize * 2 + 1];
 
         jobsPaths[0] = "outputFirstJob";
@@ -358,17 +357,24 @@ public class EfficientDiverseSelector {
             EfficientDiverseSelector.runJob("Find Maximal User",
                     EfficientDiverseSelector.class, ((115910313 / this.numberMappers) + 1),
                     UserRetriever.class, IntWritable.class, Text.class,
-                    PartialMaxUserRetriever.class,
-                    MaxUserRetriever.class, IntWritable.class, EfficientUser.class,
+                    LocalMaxRetriever.class,
+                    GlobalMaxRetriever.class, IntWritable.class, EfficientUser.class,
                     1, jobsPaths[i], jobsPaths[i + 1]);
 
             /* JOB 3 */
             EfficientDiverseSelector.runJob("Remove Maximal User",
                     EfficientDiverseSelector.class, ((115910313 / this.numberMappers) + 1),
-                    MaxUserRemover.class, IntWritable.class, EfficientUser.class,
+                    ScoreUpdater.class, IntWritable.class, EfficientUser.class,
                     null,
                     null, null, null,
                     (int) (this.numberMappers * 1.75), jobsPaths[i + 1], jobsPaths[i + 2]);
         }
+    }
+
+    public static void main(String[] args) throws Exception {
+        EfficientDiverseSelector diverseSelector = new EfficientDiverseSelector();
+        JCommander.newBuilder().addObject(diverseSelector).build().parse(args);
+        diverseSelector.setNumberReducers();
+        diverseSelector.select();
     }
 }

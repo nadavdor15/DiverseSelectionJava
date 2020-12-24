@@ -5,7 +5,6 @@ import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Random;
 
 import com.beust.jcommander.JCommander;
 import com.beust.jcommander.Parameter;
@@ -31,10 +30,12 @@ public class EfficientDiverseSelector {
     @Parameter(names={"-i", "--input"}, description = "Path of the input file")
     String inputPath = "input";
     @Parameter(names={"-m", "--mappers"}, description = "Number of mappers")
-    int numberMappers = 8;
+    int numberMappers = 3;
     @Parameter(names={"-r", "--reducers"}, description = "Proportion of reducers to mappers")
     double reducersProportion = 1.75;
     private int numberReducers;
+
+    private final static IntWritable key = new IntWritable(1);
 
     public static class TextArrayWritable extends ArrayWritable {
 
@@ -109,8 +110,6 @@ public class EfficientDiverseSelector {
     public static class ReduceToUser
             extends Reducer<Text, Text, IntWritable, EfficientUser> {
 
-        private final static IntWritable key = new IntWritable(1);
-
         public void reduce(Text user, Iterable<Text> groups,
                            Context context
         ) throws IOException, InterruptedException {
@@ -121,25 +120,77 @@ public class EfficientDiverseSelector {
             }
 
             String[] groupsAsArray = new String[groupsAsList.size()];
-            context.write(key, new EfficientUser(user.toString(), groupsAsList.toArray(groupsAsArray)));
+            context.write(EfficientDiverseSelector.key, new EfficientUser(user.toString(), groupsAsList.toArray(groupsAsArray)));
         }
     }
 
-    public static class UserRetriever
+    public static class ScoreCalculator
             extends Mapper<Object, Text, IntWritable, Text> {
+        private EfficientUser lastMaxUser;
+        private List<String> lastMaxUserGroups;
 
-        private IntWritable randomKey;
-
-        protected void setup(Context context) {
-            Random rand = new Random();
-            this.randomKey = new IntWritable(rand.nextInt(context.getNumReduceTasks()));
+        protected void setup(Context context) throws IOException {
+            this.lastMaxUser = readUserFromHDFS(context);
+            if (lastMaxUser != null) {
+                this.lastMaxUserGroups = new ArrayList<String>();
+                for (Text group : this.lastMaxUser.get()) {
+                    this.lastMaxUserGroups.add(group.toString().split("\\s+")[0]);
+                }
+            } else {
+                this.lastMaxUserGroups = null;
+            }
         }
 
         public void map(Object key, Text value, Context context
         ) throws IOException, InterruptedException {
             String valueAsString = value.toString();
             String userInformation = valueAsString.substring(valueAsString.indexOf('\t') + 1);
-            context.write(randomKey, new Text(userInformation));
+            value = new Text(userInformation);
+            if (this.lastMaxUser != null) {
+                EfficientUser user = EfficientDiverseSelector.getUser(value);
+                List<String> newGroupsList = new ArrayList<String>();
+                if (!this.lastMaxUser.getId().equals(user.getId())) {
+                    for (Text group : user.get()) {
+                        String[] groupInformation = group.toString().split(",");
+                        String groupIdx = groupInformation[0];
+                        int groupSize = Integer.parseInt(groupInformation[1]);
+                        int groupCov = Integer.parseInt(groupInformation[2]);
+                        if (this.lastMaxUserGroups.contains(groupIdx)) {
+                            groupCov -= 1;
+                        }
+                        if (groupCov > 0) {
+                            String groupInfo = groupIdx + "," + groupSize + "," + groupCov;
+                            newGroupsList.add(groupInfo);
+                        }
+                    }
+                    String[] newGroupsArray = new String[newGroupsList.size()];
+                    context.write(EfficientDiverseSelector.key,
+                            new EfficientUser(user.getId(), newGroupsList.toArray(newGroupsArray)).toText());
+                }
+            } else {
+                context.write(EfficientDiverseSelector.key, new Text(userInformation));
+            }
+        }
+
+        private EfficientUser readUserFromHDFS(Context context) throws IOException {
+            FSDataInputStream os;
+            BufferedReader br;
+            Configuration configuration = context.getConfiguration();
+            configuration.setBoolean("fs.hdfs.impl.disable.cache", true);
+            FileSystem hdfs = FileSystem.get(configuration);
+
+            String maxUser;
+            Path maxFile = new Path("max.txt");
+            if (hdfs.exists(maxFile)) {
+                os = hdfs.open(maxFile);
+                br = new BufferedReader(new InputStreamReader(os, "UTF-8"));
+                maxUser = br.readLine();
+                br.close();
+                hdfs.close();
+                return EfficientDiverseSelector.getUser(new Text(maxUser));
+            } else {
+                return null;
+            }
         }
     }
 
@@ -169,31 +220,26 @@ public class EfficientDiverseSelector {
     public static class GlobalMaxRetriever
             extends Reducer<IntWritable, Text, IntWritable, EfficientUser> {
 
-        private static final IntWritable key = new IntWritable(1);
         private static final IntWritable maxInt = new IntWritable(Integer.MAX_VALUE);
 
-        public void reduce(IntWritable key, Iterable<Text> users,
-                           Context context
-        ) throws IOException, InterruptedException {
+        public void reduce(IntWritable key, Iterable<Text> users, Context context)
+                throws IOException, InterruptedException {
             if (key.equals(maxInt)) {
                 int maxScore = 0;
                 EfficientUser maxUser = new EfficientUser();
                 for (Text text : users) {
                     EfficientUser user = EfficientDiverseSelector.getUser(text);
+                    context.write(key, user);
                     int score = user.getScore();
                     if (score > maxScore) {
                         maxScore = score;
                         maxUser = user;
                     }
                 }
-                try {
-                    this.writeUserToHDFS(maxUser, context);
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
-            } else {
+                this.writeUserToHDFS(maxUser, context);
+            } else if (key.equals(EfficientDiverseSelector.key)) {
                 for (Text text : users) {
-                    context.write(GlobalMaxRetriever.key, EfficientDiverseSelector.getUser(text));
+                    context.write(EfficientDiverseSelector.key, EfficientDiverseSelector.getUser(text));
                 }
             }
         }
@@ -222,84 +268,23 @@ public class EfficientDiverseSelector {
             br.write(maxUser.getId() + " " + maxUser.getScore());
             br.newLine();
             br.close();
-
-            hdfs.close();
         }
     }
 
-    public static class ScoreUpdater
-            extends Mapper<Object, Text, IntWritable, EfficientUser> {
-
-        private final static IntWritable key = new IntWritable(1);
-        private EfficientUser maxUser;
-        private List<String> maxUserGroups;
-
-        protected void setup(Context context) throws IOException {
-            this.maxUser = readUserFromHDFS(context);
-            this.maxUserGroups = new ArrayList<String>();
-            for (Text group : this.maxUser.get()) {
-                this.maxUserGroups.add(group.toString().split("\\s+")[0]);
-            }
-        }
-
-        public void map(Object key, Text value, Context context
-        ) throws IOException, InterruptedException {
-            String valueAsString = value.toString();
-            value = new Text(valueAsString.substring(valueAsString.indexOf('\t') + 1));
-            EfficientUser user = EfficientDiverseSelector.getUser(value);
-            List<String> newGroupsList = new ArrayList<String>();
-            if (!this.maxUser.getId().equals(user.getId())) {
-                for (Text group : user.get()) {
-                    String[] groupInformation = group.toString().split(",");
-                    String groupIdx = groupInformation[0];
-                    int groupSize = Integer.parseInt(groupInformation[1]);
-                    int groupCov = Integer.parseInt(groupInformation[2]);
-                    if (this.maxUserGroups.contains(groupIdx)) {
-                        groupCov -= 1;
-                    }
-                    if (groupCov > 0) {
-                        String groupInfo = groupIdx + "," + groupSize + "," + groupCov;
-                        newGroupsList.add(groupInfo);
-                    }
-                }
-                String[] newGroupsArray = new String[newGroupsList.size()];
-                context.write(ScoreUpdater.key,
-                        new EfficientUser(user.getId(), newGroupsList.toArray(newGroupsArray)));
-            }
-        }
-
-        private EfficientUser readUserFromHDFS(Context context) throws IOException {
-            FSDataInputStream os;
-            BufferedReader br;
-            Configuration configuration = context.getConfiguration();
-            configuration.setBoolean("fs.hdfs.impl.disable.cache", true);
-            FileSystem hdfs = FileSystem.get(configuration);
-
-            String maxUser;
-            Path maxFile = new Path("max.txt");
-            if (hdfs.exists(maxFile)) {
-                os = hdfs.open(maxFile);
-                br = new BufferedReader(new InputStreamReader(os, "UTF-8"));
-                maxUser = br.readLine();
-                br.close();
-                hdfs.close();
-                return EfficientDiverseSelector.getUser(new Text(maxUser));
-            } else {
-                return null;
-            }
-        }
-    }
-
-    public static void runJob(String jobName, Class<?> jarClass, int blockSize,
+    private static void runJob(String jobName, Class<?> jarClass, int blockSize,
                                  Class<? extends Mapper> mapper, Class<?> mapKey, Class<?> mapValue,
                                  Class<? extends Reducer> combinerClass,
                                  Class<? extends Reducer> reducerClass, Class<?> reduceKey, Class<?> reduceValue,
-                                 int numReduceTasks, String inputPath, String outputPath) throws Exception {
+                                 int numReduceTasks, int numMapTasks, String inputPath, String outputPath) throws Exception {
+        System.out.printf("Mappers: %d\nReducers: %d\n", numMapTasks, numReduceTasks);
         Configuration conf = new Configuration();
-        conf.set("mapred.max.split.size", Integer.toString(blockSize));
+        conf.set("mapreduce.job.maps", Integer.toString(numMapTasks));
+        conf.set("mapreduce.input.fileinputformat.split.maxsize", Integer.toString(blockSize));
+        conf.set("mapreduce.input.fileinputformat.split.minsize", Integer.toString(blockSize));
+        blockSize -= blockSize % conf.getInt("dfs.bytes-per-checksum", 512);
+        conf.set("dfs.blocksize", Integer.toString(blockSize));
 
         Job job = Job.getInstance(conf, jobName);
-
         job.getConfiguration().set("fs.file.impl", "com.conga.services.hadoop.patch.HADOOP_7682.WinLocalFileSystem");
 
         job.setJarByClass(jarClass);
@@ -329,45 +314,48 @@ public class EfficientDiverseSelector {
         }
     }
 
-    public void select() throws Exception {
-        System.out.printf("Mappers: %d\nReducers: %d\n", this.numberMappers, this.numberReducers);
-        String[] jobsPaths = new String[this.selectionSize * 2 + 1];
+    private int getSplitSize(long inputSize) {
+        return (int) ((inputSize / this.numberMappers) + 1);
+    }
 
-        jobsPaths[0] = "outputFirstJob";
+    private void select() throws Exception {
+        String[] jobsPaths = new String[this.selectionSize + 1];
+        jobsPaths[0] = "outputGenerate";
         for (int i = 1; i < jobsPaths.length; i++) {
-            if (i % 2 == 1) {
-                jobsPaths[i] = "outputFind" + (i/2 + 1);
-            } else {
-                jobsPaths[i] = "outputRemove" + (i/2);
-            }
+            jobsPaths[i] = "outputSelect" + i;
         }
+
+        FileSystem hdfs = FileSystem.get(new Configuration());
 
         /* JOB 1 */
         Path inputPath = new Path(Path.CUR_DIR + "/" + this.inputPath + "/" + "groups.txt");
-        long inputSize = inputPath.getFileSystem(new Configuration()).getContentSummary(inputPath).getLength();
-        EfficientDiverseSelector.runJob("Retrieve Groups",
-                EfficientDiverseSelector.class, (int) ((inputSize / this.numberMappers) + 1),
+        long inputSize = 0;
+        if (hdfs.exists(inputPath)) {
+            inputSize = hdfs.getContentSummary(inputPath).getLength();
+        }
+        // System.out.printf("inputSize: %d, splitSize: %d\n", inputSize, this.getSplitSize(inputSize));
+        EfficientDiverseSelector.runJob("Generate Users",
+                EfficientDiverseSelector.class, this.getSplitSize(inputSize),
                 GroupsRetriever.class, Text.class, Text.class,
                 null,
                 ReduceToUser.class, IntWritable.class, EfficientUser.class,
-                (int) (this.numberMappers * 1.75), this.inputPath, jobsPaths[0]);
-
-        for (int i = 0; (i + 2) < jobsPaths.length; i += 2) {
+                this.numberReducers, this.numberMappers, this.inputPath, jobsPaths[0]);
+        for (int i = 0; (i + 1) < jobsPaths.length; i++) {
             /* JOB 2 */
+            inputSize = 0;
+            for (int j = 0; j < this.numberReducers; j++) {
+                inputPath = new Path(Path.CUR_DIR + "/" + jobsPaths[i] + "/" + "part-r-0000" + j);
+                if (hdfs.exists(inputPath)) {
+                    inputSize += hdfs.getContentSummary(inputPath).getLength();
+                }
+            }
+            System.out.printf("inputSize: %d, splitSize: %d\n", inputSize, this.getSplitSize(inputSize));
             EfficientDiverseSelector.runJob("Find Maximal User",
-                    EfficientDiverseSelector.class, ((115910313 / this.numberMappers) + 1),
-                    UserRetriever.class, IntWritable.class, Text.class,
+                    EfficientDiverseSelector.class, this.getSplitSize(inputSize),
+                    ScoreCalculator.class, IntWritable.class, Text.class,
                     LocalMaxRetriever.class,
                     GlobalMaxRetriever.class, IntWritable.class, EfficientUser.class,
-                    1, jobsPaths[i], jobsPaths[i + 1]);
-
-            /* JOB 3 */
-            EfficientDiverseSelector.runJob("Remove Maximal User",
-                    EfficientDiverseSelector.class, ((115910313 / this.numberMappers) + 1),
-                    ScoreUpdater.class, IntWritable.class, EfficientUser.class,
-                    null,
-                    null, null, null,
-                    (int) (this.numberMappers * 1.75), jobsPaths[i + 1], jobsPaths[i + 2]);
+                    this.numberReducers, this.numberMappers, jobsPaths[i], jobsPaths[i + 1]);
         }
     }
 
